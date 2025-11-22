@@ -1,0 +1,38 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+millis_counter                                                                    0x0500       4
+lpf                                                                               0x0504       5
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+timer0_comp_isr                                                                   0x00087     28
+millis                                                                            0x000A3     17
+Timer0_Init                                                                       0x000B4     10
+UART0_init                                                                        0x000BE     11
+TWI_init                                                                          0x000C9      7
+TWI_start                                                                         0x000D0      8
+TWI_stop                                                                          0x000D8      4
+TWI_write                                                                         0x000DC     13
+TWI_read_ack                                                                      0x000E9      8
+TWI_read_nack                                                                     0x000F1     10
+WriteReg                                                                          0x000FB     16
+MAX30102_Init_Universal                                                           0x0010B     32
+ReadFIFO                                                                          0x0012B     78
+LPF_Process                                                                       0x00179     47
+main                                                                              0x001A8    334
+putchar                                                                           0x002F6      7
+put_usart_G100                                                                    0x002FD     14
+_print_G100                                                                       0x0030B    330
+printf                                                                            0x00455     39
+strlen                                                                            0x0047C     12
+strlenf                                                                           0x00488     13

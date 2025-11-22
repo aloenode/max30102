@@ -1,0 +1,35 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+prev_w (max_new.c)                                                                0x0500       4
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+TWI_init                                                                          0x00079      8
+TWI_start                                                                         0x00081      8
+TWI_stop                                                                          0x00089      4
+TWI_write                                                                         0x0008D     13
+TWI_read_ack                                                                      0x0009A      8
+TWI_read_nack                                                                     0x000A2     10
+MAX30102_writeReg                                                                 0x000AC     12
+MAX30102_readReg                                                                  0x000B8     14
+MAX30102_init                                                                     0x000C6     40
+MAX30102_readFIFO                                                                 0x000EE     91
+getDCremoved                                                                      0x00149     55
+UART0_init                                                                        0x00180     11
+main                                                                              0x0018B     50
+putchar                                                                           0x001BD      7
+put_usart_G100                                                                    0x001C4     14
+_print_G100                                                                       0x001D2    336
+printf                                                                            0x00322     39
+strlen                                                                            0x00349     12
+strlenf                                                                           0x00355     13

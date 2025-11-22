@@ -1,0 +1,29 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+UART0_init                                                                        0x000A3     11
+TWI_init                                                                          0x000AE      7
+TWI_start                                                                         0x000B5      8
+TWI_stop                                                                          0x000BD      4
+TWI_write                                                                         0x000C1     12
+TWI_read_nack                                                                     0x000CD     10
+MAX30102_ReadPartID                                                               0x000D7     15
+main                                                                              0x000E6     42
+putchar                                                                           0x00110      7
+put_usart_G100                                                                    0x00117     14
+_print_G100                                                                       0x00125    296
+printf                                                                            0x0024D     39
+strlen                                                                            0x00274     12
+strlenf                                                                           0x00280     13

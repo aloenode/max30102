@@ -1,0 +1,58 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+millis_counter                                                                    0x0500       4
+lpf_red                                                                           0x0504       5
+lpf_ir                                                                            0x0509       5
+hpf_red                                                                           0x050E       9
+diff_red                                                                          0x0517       5
+stat_red                                                                          0x051C      14
+stat_ir                                                                           0x052A      14
+last_heartbeat                                                                    0x0538       4
+finger_timestamp                                                                  0x053C       4
+last_diff                                                                         0x0540       4
+crossed_time                                                                      0x0544       4
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+finger_detected                                                                   R5           1
+crossed                                                                           R4           1
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+timer0_comp_isr                                                                   0x000A6     28
+millis                                                                            0x000C2     18
+Timer0_Init                                                                       0x000D4     10
+LPF_Reset                                                                         0x000DE      5
+LPF_Process                                                                       0x000E3     34
+HPF_Reset                                                                         0x00105      5
+HPF_Process                                                                       0x0010A     47
+Diff_Reset                                                                        0x00139      5
+Diff_Process                                                                      0x0013E     35
+Stat_Reset                                                                        0x00161     17
+Stat_Process                                                                      0x00172     37
+Stat_GetAvg                                                                       0x00197     28
+UART0_init                                                                        0x001B3     11
+TWI_init                                                                          0x001BE      7
+TWI_start                                                                         0x001C5      8
+TWI_stop                                                                          0x001CD      4
+TWI_write                                                                         0x001D1     13
+TWI_read_ack                                                                      0x001DE      8
+TWI_read_nack                                                                     0x001E6     10
+WriteReg                                                                          0x001F0     16
+MAX30102_Init_400Hz                                                               0x00200     32
+ReadFIFO                                                                          0x00220     78
+Reset_All_Filters                                                                 0x0026E     24
+main                                                                              0x00286    369
+putchar                                                                           0x003F7      7
+put_usart_G100                                                                    0x003FE     10
+_print_G100                                                                       0x00408    293
+printf                                                                            0x0052D     39
+strlen                                                                            0x00554     12
+strlenf                                                                           0x00560     13

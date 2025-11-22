@@ -1,0 +1,226 @@
+#define F_CPU 16000000UL // 16MHz Clock
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+
+// --- UART for Debugging (printf) ---
+void UART1_init(unsigned int baud) {
+    unsigned int ubrr = F_CPU / 16 / baud - 1;
+    UBRR1H = (unsigned char)(ubrr >> 8);
+    UBRR1L = (unsigned char)ubrr;
+    UCSR1B = (1 << RXEN1) | (1 << TXEN1);
+    UCSR1C = (1 << UCSZ11) | (1 << UCSZ10); // 8-bit data
+}
+
+int UART1_transmit(char c, FILE *stream) {
+    while (!(UCSR1A & (1 << UDRE1)));
+    UDR1 = c;
+    return 0;
+}
+
+FILE uart_output = FDEV_SETUP_STREAM(UART1_transmit, NULL, _FDEV_SETUP_WRITE);
+
+// --- I2C (TWI) Functions ---
+#define MAX30102_ADDR_W 0xAE // 
+#define MAX30102_ADDR_R 0xAF // 
+
+void TWI_init(void) {
+    TWSR = 0x00; // Prescaler = 1
+    TWBR = 72;   // SCL freq = 100kHz @ 16MHz
+    TWCR = (1 << TWEN);
+}
+
+void TWI_start(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+void TWI_stop(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
+
+void TWI_write(uint8_t data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+uint8_t TWI_read_ack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA);
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+uint8_t TWI_read_nack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+// Write to Register
+void MAX30102_writeReg(uint8_t reg, uint8_t value) {
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(reg);
+    TWI_write(value);
+    TWI_stop();
+}
+
+// Read from Register
+uint8_t MAX30102_readReg(uint8_t reg) {
+    uint8_t data;
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(reg);
+    TWI_start(); // Repeated Start
+    TWI_write(MAX30102_ADDR_R);
+    data = TWI_read_nack();
+    TWI_stop();
+    return data;
+}
+
+// --- MAX30102 Register Addresses [cite: 445] ---
+#define REG_INTR_STATUS_1 0x00
+#define REG_INTR_STATUS_2 0x01
+#define REG_FIFO_WR_PTR   0x04
+#define REG_OVF_COUNTER   0x05
+#define REG_FIFO_RD_PTR   0x06
+#define REG_FIFO_DATA     0x07
+#define REG_FIFO_CONFIG   0x08
+#define REG_MODE_CONFIG   0x09
+#define REG_SPO2_CONFIG   0x0A
+#define REG_LED1_PA       0x0C
+#define REG_LED2_PA       0x0D
+
+// --- Global Variables for Signal Processing ---
+long red_dc_filter = 0;
+long ir_dc_filter = 0;
+long red_ac = 0;
+
+void MAX30102_init(void) {
+    // 1. Reset
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x40); // Bit 6: Reset 
+    _delay_ms(100);
+
+    // 2. FIFO Config
+    // SMP_AVE=010 (4 samples avg), ROLLOVER_EN=1
+    MAX30102_writeReg(REG_FIFO_CONFIG, 0x40 | 0x10); // [cite: 687]
+
+    // 3. Mode Config
+    // SpO2 Mode (Red and IR) -> 0x03
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x03); // 
+
+    // 4. SpO2 Config
+    // ADC Range 4096nA (01), 100Hz (001), PulseWidth 411us (11) -> 18 bit resolution
+    // Register: SPO2_ADC_RGE[1:0] | SPO2_SR[2:0] | LED_PW[1:0]
+    // Value: (0x01 << 5) | (0x01 << 2) | 0x03 = 0x20 | 0x04 | 0x03 = 0x27
+    MAX30102_writeReg(REG_SPO2_CONFIG, 0x27); // 
+
+    // 5. LED Pulse Amplitude
+    // 약 6.2mA ~ 7mA 수준 설정 (0x1F = 6.2mA typical)
+    MAX30102_writeReg(REG_LED1_PA, 0x24); // Red LED 
+    MAX30102_writeReg(REG_LED2_PA, 0x24); // IR LED 
+
+    // Clear FIFO pointers
+    MAX30102_writeReg(REG_FIFO_WR_PTR, 0x00);
+    MAX30102_writeReg(REG_OVF_COUNTER, 0x00);
+    MAX30102_writeReg(REG_FIFO_RD_PTR, 0x00);
+}
+
+// Read FIFO Data [cite: 583, 601]
+// Returns 1 if data read successfully, 0 otherwise
+uint8_t MAX30102_readFIFO(uint32_t *red_led, uint32_t *ir_led) {
+    uint8_t ptr_w = MAX30102_readReg(REG_FIFO_WR_PTR);
+    uint8_t ptr_r = MAX30102_readReg(REG_FIFO_RD_PTR);
+
+    // Check if new data is available
+    if (ptr_w == ptr_r) return 0;
+
+    // Burst Read from FIFO_DATA (0x07)
+    // Note: FIFO_DATA register does not increment address, so we read same address repeatedly 
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(REG_FIFO_DATA);
+    TWI_start(); // Repeated Start
+    TWI_write(MAX30102_ADDR_R);
+
+    uint8_t d[6];
+    // Read 6 bytes: Red[2], Red[1], Red[0], IR[2], IR[1], IR[0]
+    for(int i=0; i<5; i++) d[i] = TWI_read_ack();
+    d[5] = TWI_read_nack();
+    TWI_stop();
+
+    // Combine bytes (18-bit data, left justified in datasheet, but practically MSBs are in lower indexes)
+    // Datasheet Figure 2 shows: Byte 1 (MSB), Byte 2, Byte 3 (LSB) 
+    // Mask with 0x03FFFF to keep 18-bit data
+    *red_led = ((uint32_t)d[0] << 16 | (uint32_t)d[1] << 8 | d[2]) & 0x03FFFF;
+    *ir_led  = ((uint32_t)d[3] << 16 | (uint32_t)d[4] << 8 | d[5]) & 0x03FFFF;
+
+    return 1;
+}
+
+// Simple DC Removal Filter
+long getDCremoved(uint32_t raw_value) {
+    // IIR Filter: y[n] = x[n] - x[n-1] + 0.99 * y[n-1]
+    static long prev_w = 0;
+    long w = raw_value + (0.95 * prev_w); // 0.95 is alpha
+    long result = w - prev_w;
+    prev_w = w;
+    return result;
+}
+
+int main(void) {
+    uint32_t red_val, ir_val;
+    long red_filtered;
+    
+    // Heart Rate Vars
+    int beat_detected = 0;
+    long threshold = 100; // Threshold for beat detection (needs tuning based on LED current)
+    unsigned long last_beat_time = 0;
+    unsigned long current_time = 0;
+    int bpm = 0;
+
+    // Init hardware
+    UART1_init(9600);
+    stdout = &uart_output;
+    TWI_init();
+    
+    printf("MAX30102 Init...\r\n");
+    MAX30102_init();
+    printf("Init Done. Reading Data...\r\n");
+
+    while (1) {
+        current_time++; // Simple counter for timing (Should use Timer for accurate BPM)
+
+        if (MAX30102_readFIFO(&red_val, &ir_val)) {
+            // Remove DC component from Red LED for Heart Rate
+            red_filtered = getDCremoved(red_val);
+
+            // Simple Beat Detection Logic (Rising Edge crossing threshold)
+            if (red_filtered > threshold && !beat_detected) {
+                beat_detected = 1;
+                
+                // Calculate BPM (Example logic - requires Timer interrupt for real units)
+                unsigned long delta = current_time - last_beat_time;
+                last_beat_time = current_time;
+                
+                // Assuming loop runs approx every 10ms (100Hz sample rate dependent)
+                // BPM = 6000 / delta_samples (Rough estimate)
+                if(delta > 20) { // De-bouncing (limit max BPM)
+                     // This is pseudo-calculation. Use Timer1 for real milliseconds.
+                     printf("BEAT! Raw: %ld, Filtered: %ld\r\n", red_val, red_filtered);
+                }
+            } 
+            else if (red_filtered < threshold) {
+                beat_detected = 0;
+            }
+
+            // Print for Serial Plotter (Arduino IDE Serial Plotter compatible format)
+            // Output: RawRed, FilteredRed
+            // printf("%ld,%ld\r\n", red_val, red_filtered); 
+            
+            // Adjust loop speed to match sample rate approximately if not using interrupts
+            _delay_ms(5); 
+        }
+    }
+}

@@ -1,0 +1,158 @@
+/*
+ * MAX30102_BPM_Timer.c
+ * Compiler: CodeVisionAVR
+ * Target: ATmega128 / 16MHz
+ */
+
+#include <mega128a.h>
+#include <delay.h>
+#include <stdio.h>
+#include <stdint.h>
+
+// --- 전역 타이머 변수 (volatile 필수) ---
+// 1ms마다 증가하여 시스템 시간을 기록
+volatile unsigned long millis_counter = 0;
+
+// --- 인터럽트 서비스 루틴 (Timer 0 Compare Match) ---
+// 1ms마다 정확히 이 함수가 실행됩니다.
+interrupt [TIM0_COMP] void timer0_comp_isr(void)
+{
+    millis_counter++;
+}
+
+// --- MAX30102 및 I2C 정의 ---
+#define MAX30102_ADDR_W 0xAE
+#define MAX30102_ADDR_R 0xAF
+#define REG_INTR_ENABLE_1 0x02
+#define REG_FIFO_DATA     0x07
+#define REG_FIFO_CONFIG   0x08
+#define REG_MODE_CONFIG   0x09
+#define REG_SPO2_CONFIG   0x0A
+#define REG_LED1_PA       0x0C
+#define REG_LED2_PA       0x0D
+
+// --- UART 함수 ---
+void UART0_init(void) {
+    UBRR0H = 0; UBRR0L = 103; // 9600bps
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+void putchar(char c) { while (!(UCSR0A & (1 << UDRE0))); UDR0 = c; }
+
+// --- I2C 함수 ---
+void TWI_init(void) { TWSR=0x00; TWBR=72; }
+void TWI_start(void) { TWCR=(1<<TWINT)|(1<<TWSTA)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); }
+void TWI_stop(void) { TWCR=(1<<TWINT)|(1<<TWSTO)|(1<<TWEN); }
+void TWI_write(uint8_t data) { TWDR=data; TWCR=(1<<TWINT)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); }
+uint8_t TWI_read_ack(void) { TWCR=(1<<TWINT)|(1<<TWEN)|(1<<TWEA); while(!(TWCR&(1<<TWINT))); return TWDR; }
+uint8_t TWI_read_nack(void) { TWCR=(1<<TWINT)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); return TWDR; }
+
+void MAX30102_WriteReg(uint8_t reg, uint8_t val) {
+    TWI_start(); TWI_write(MAX30102_ADDR_W); TWI_write(reg); TWI_write(val); TWI_stop();
+}
+
+void MAX30102_Init() {
+    MAX30102_WriteReg(REG_MODE_CONFIG, 0x40); delay_ms(100);
+    MAX30102_WriteReg(REG_INTR_ENABLE_1, 0xC0);
+    MAX30102_WriteReg(REG_FIFO_CONFIG, 0x50);
+    MAX30102_WriteReg(REG_SPO2_CONFIG, 0x27); 
+    MAX30102_WriteReg(REG_LED1_PA, 0x24); 
+    MAX30102_WriteReg(REG_LED2_PA, 0x24); 
+    MAX30102_WriteReg(REG_MODE_CONFIG, 0x03);
+}
+
+void MAX30102_ReadFIFO(uint32_t *red, uint32_t *ir) {
+    uint8_t temp[6];
+    int i;
+    TWI_start(); TWI_write(MAX30102_ADDR_W); TWI_write(REG_FIFO_DATA);
+    TWI_start(); TWI_write(MAX30102_ADDR_R);
+    for(i=0; i<5; i++) temp[i] = TWI_read_ack();
+    temp[5] = TWI_read_nack();
+    TWI_stop();
+    *red = ((uint32_t)temp[0]<<16 | (uint32_t)temp[1]<<8 | temp[2]) & 0x3FFFF;
+    *ir  = ((uint32_t)temp[3]<<16 | (uint32_t)temp[4]<<8 | temp[5]) & 0x3FFFF;
+}
+
+// --- 타이머 초기화 함수 (16MHz 기준 1ms) ---
+void Timer0_Init(void) {
+    // CTC 모드(WGM01=1), 분주비 64(CS02=0, CS01=1, CS00=1)
+    // 계산: 16,000,000 / 64 / 1000Hz = 250
+    // 0부터 세므로 OCR0 = 249
+    TCCR0 = (1 << WGM01) | (0 << CS02) | (1 << CS01) | (1 << CS00); // 0x0B
+    TCNT0 = 0x00;
+    OCR0  = 249; 
+    
+    // Timer 0 Output Compare Match Interrupt Enable
+    TIMSK |= (1 << OCIE0);
+}
+
+// =================================================================
+#define FINGER_ON_THRESHOLD 50000 
+#define BEAT_MIN_TIME_MS    300   
+
+float dc_filter_ir = 0;
+float ac_signal_ir = 0;
+float last_ac_signal_ir = 0;
+
+unsigned long last_beat_time = 0; // 타이머 카운터 기준 시간 저장
+
+void main(void) {
+    uint32_t red_val, ir_val;
+    int bpm = 0;
+    unsigned long delta = 0; 
+    unsigned long current_millis; // 현재 시간 스냅샷
+
+    // 초기화
+    UART0_init();
+    TWI_init();
+    Timer0_Init(); // 타이머 시작
+    
+    // 전역 인터럽트 활성화 (필수!)
+    #asm("sei")
+    
+    delay_ms(1000);
+    printf("System Ready (Timer Mode).\r\n");
+    MAX30102_Init();
+
+    while (1) {
+        // 현재 시간을 정확하게 가져옴
+        current_millis = millis_counter;
+
+        MAX30102_ReadFIFO(&red_val, &ir_val);
+
+        if (ir_val < FINGER_ON_THRESHOLD) {
+            ir_val = 0;
+            ac_signal_ir = 0;
+            dc_filter_ir = 0;
+            bpm = 0;
+            printf("No Finger\r\n");
+        } 
+        else {
+            dc_filter_ir = (float)ir_val * 0.05 + dc_filter_ir * 0.95;
+            ac_signal_ir = (float)ir_val - dc_filter_ir;
+
+            // 피크 감지 로직
+            if (ac_signal_ir < -100 && ac_signal_ir < last_ac_signal_ir) {
+                // 타이머 값을 이용하여 정확한 간격 계산
+                if ((current_millis - last_beat_time) > BEAT_MIN_TIME_MS) {
+                    
+                    delta = current_millis - last_beat_time; // 정확한 ms 차이
+                    last_beat_time = current_millis;
+                    
+                    if(delta != 0) {
+                        bpm = 60000 / delta;
+                    }
+                }
+            }
+            last_ac_signal_ir = ac_signal_ir;
+        }
+
+        if(bpm > 200 || bpm < 40) bpm = 0;
+
+        printf("BPM:%d, IR_AC:%d\r\n", bpm, (int)ac_signal_ir);
+
+        // 루프 속도 조절 (샘플링 레이트 100Hz에 맞춤)
+        // 여기서 delay를 써도 타이머(millis_counter)는 계속 백그라운드에서 돌아갑니다.
+        delay_ms(10); 
+    }
+}

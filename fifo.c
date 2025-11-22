@@ -1,0 +1,171 @@
+/*
+ * MAX30102_FIFO_Read.c
+ * Compiler: CodeVisionAVR
+ * Target: ATmega128 / 16MHz
+ */
+
+#include <mega128a.h>
+#include <delay.h>
+#include <stdio.h>
+#include <stdint.h>
+
+// --- MAX30102 주소 및 레지스터 정의 ---
+#define MAX30102_ADDR_W 0xAE
+#define MAX30102_ADDR_R 0xAF
+
+#define REG_INTR_ENABLE_1 0x02
+#define REG_FIFO_WR_PTR   0x04
+#define REG_FIFO_RD_PTR   0x06
+#define REG_FIFO_DATA     0x07
+#define REG_FIFO_CONFIG   0x08
+#define REG_MODE_CONFIG   0x09
+#define REG_SPO2_CONFIG   0x0A
+#define REG_LED1_PA       0x0C
+#define REG_LED2_PA       0x0D
+
+// --- UART (printf용) ---
+void UART0_init(void) {
+    UBRR0H = 0;
+    UBRR0L = 103; // 9600bps @ 16MHz
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+
+#define putchar putchar_avr
+
+void putchar_avr(char c) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = c;
+}
+
+// --- I2C (TWI) 제어 함수 ---
+void TWI_init(void) {
+    TWSR = 0x00; 
+    TWBR = 72; // 100kHz
+}
+
+void TWI_start(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+void TWI_stop(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
+
+void TWI_write(uint8_t data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+// [추가됨] 연속 읽기용 ACK 응답 함수
+uint8_t TWI_read_ack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA); // ACK Enable
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+// 마지막 바이트용 NACK 응답 함수
+uint8_t TWI_read_nack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN); // ACK Disable (NACK)
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+// 레지스터 쓰기 헬퍼 함수
+void MAX30102_WriteReg(uint8_t reg, uint8_t val) {
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(reg);
+    TWI_write(val);
+    TWI_stop();
+}
+
+// --- MAX30102 초기화 ---
+void MAX30102_Init() {
+    // 1. Reset
+    MAX30102_WriteReg(REG_MODE_CONFIG, 0x40); 
+    delay_ms(100);
+
+    // 2. Interrupt Enable (PPG Ready)
+    MAX30102_WriteReg(REG_INTR_ENABLE_1, 0xC0); // A_FULL_EN, PPG_RDY_EN
+
+    // 3. FIFO Config (Average 4, Rollover Enable)
+    // SMP_AVE=010(4samples), FIFO_ROLLOVER_EN=1 -> 0x50
+    MAX30102_WriteReg(REG_FIFO_CONFIG, 0x50); 
+
+    // 4. SpO2 Config (Range 4096nA, 100Hz, 411us Pulse Width)
+    // ADC Range=4096nA(01), SR=100Hz(001), PW=411us(11) -> 0x27
+    //[cite_start]// 411us를 쓰면 18-bit 해상도를 얻습니다[cite: 742].
+    MAX30102_WriteReg(REG_SPO2_CONFIG, 0x27);
+
+    // 5. LED Current (밝기 설정, 약 6.2mA)
+    MAX30102_WriteReg(REG_LED1_PA, 0x1F); // Red
+    MAX30102_WriteReg(REG_LED2_PA, 0x1F); // IR
+
+    // 6. Mode Config (SpO2 Mode: Red + IR)
+    MAX30102_WriteReg(REG_MODE_CONFIG, 0x03); 
+}
+
+// --- FIFO 데이터 읽기 (Red, IR) ---
+void MAX30102_ReadFIFO(uint32_t *red, uint32_t *ir) {
+    uint8_t temp[6];
+    uint8_t i;
+
+    // Write Pointer 초기화 (옵션: 읽기 포인터 정렬이 필요할 때 사용)
+    // MAX30102_WriteReg(REG_FIFO_RD_PTR, 0x00); 
+    // MAX30102_WriteReg(REG_FIFO_WR_PTR, 0x00);
+
+    // FIFO Data Register(0x07) 읽기 시작
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(REG_FIFO_DATA);
+
+    TWI_start(); // Repeated Start
+    TWI_write(MAX30102_ADDR_R);
+
+    // 6바이트 Burst Read (Red 3byte + IR 3byte)
+    // 마지막 바이트 전까지는 ACK, 마지막은 NACK
+    for(i=0; i<5; i++) {
+        temp[i] = TWI_read_ack();
+    }
+    temp[5] = TWI_read_nack(); // 마지막 바이트
+    
+    TWI_stop();
+
+    //[cite_start]// 3바이트 데이터를 18비트 정수로 변환 [cite: 612-632]
+    // MSB가 temp[0]에 위치함
+    *red = ((uint32_t)temp[0] << 16) | ((uint32_t)temp[1] << 8) | temp[2];
+    *red &= 0x03FFFF; // 18-bit Masking
+
+    *ir = ((uint32_t)temp[3] << 16) | ((uint32_t)temp[4] << 8) | temp[5];
+    *ir &= 0x03FFFF; // 18-bit Masking
+}
+
+void main(void) {
+    uint32_t red_val, ir_val;
+
+    UART0_init();
+    TWI_init();
+
+    delay_ms(1000);
+    printf("MAX30102 Initializing...\r\n");
+    
+    MAX30102_Init();
+    printf("Init Done. Reading Data...\r\n");
+
+    while (1) {
+        // 실제로는 인터럽트 핀(INT)을 확인하거나, 레지스터를 폴링해야 하지만
+        // 간단한 테스트를 위해 무조건 읽고 딜레이를 줍니다.
+        
+        MAX30102_ReadFIFO(&red_val, &ir_val);
+
+        // 시리얼 플로터용 포맷 (숫자,숫자)
+        // 손가락을 대지 않았을 때는 값이 작고, 대면 값이 커져야 합니다.
+        printf("%ld,%ld\r\n", red_val, ir_val);
+
+        delay_ms(10); // 샘플링 속도(100Hz)와 비슷하게 맞춤 (약 10ms)
+    }
+}

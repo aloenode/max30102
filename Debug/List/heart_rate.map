@@ -1,0 +1,37 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+dc_filter_ir                                                                      0x0500       4
+ac_signal_ir                                                                      0x0504       4
+last_ac_signal_ir                                                                 0x0508       4
+current_time_ms                                                                   0x050C       4
+last_beat_time                                                                    0x0510       4
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+UART0_init                                                                        0x0008E     11
+TWI_init                                                                          0x00099      7
+TWI_start                                                                         0x000A0      8
+TWI_stop                                                                          0x000A8      4
+TWI_write                                                                         0x000AC     13
+TWI_read_ack                                                                      0x000B9      8
+TWI_read_nack                                                                     0x000C1     10
+MAX30102_WriteReg                                                                 0x000CB     16
+MAX30102_Init                                                                     0x000DB     32
+MAX30102_ReadFIFO                                                                 0x000FB     81
+main                                                                              0x0014C    204
+putchar                                                                           0x00218      7
+put_usart_G100                                                                    0x0021F     14
+_print_G100                                                                       0x0022D    296
+printf                                                                            0x00355     39
+strlen                                                                            0x0037C     12
+strlenf                                                                           0x00388     13

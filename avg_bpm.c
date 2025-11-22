@@ -1,0 +1,233 @@
+/*
+ * MAX30102_Universal_Robust_Final.c
+ * Compiler: CodeVisionAVR
+ * Target: ATmega128 / 16MHz
+ * Change: FIFO Averaging set to 4x (Effective 100Hz)
+ */
+
+#include <mega128a.h>
+#include <delay.h>
+#include <stdio.h>
+#include <stdint.h>
+
+// =================================================================
+// [1] 시스템 타이머 (millis 구현)
+// =================================================================
+volatile unsigned long millis_counter = 0;
+
+interrupt [TIM0_COMP] void timer0_comp_isr(void) {
+    millis_counter++;
+}
+
+unsigned long millis(void) {
+    unsigned long m;
+    #asm("cli")
+    m = millis_counter;
+    #asm("sei")
+    return m;
+}
+
+void Timer0_Init(void) {
+    TCCR0 = (1<<WGM01) | (1<<CS01) | (1<<CS00); 
+    TCNT0 = 0x00;
+    OCR0  = 249; 
+    TIMSK |= (1<<OCIE0);
+}
+
+#define putchar putchar_avt
+void putchar_avt(char c) { 
+    while(!(UCSR0A & (1<<UDRE0))); 
+    UDR0 = c; 
+}
+
+void UART0_init(void) {
+    UBRR0H = 0; 
+    UBRR0L = 8; // 115200bps
+    UCSR0B = (1<<RXEN0)|(1<<TXEN0); 
+    UCSR0C = (1<<UCSZ01)|(1<<UCSZ00);
+}
+
+// =================================================================
+// [3] I2C (TWI)
+// =================================================================
+void TWI_init(void) { TWSR=0x00; TWBR=12; }
+void TWI_start(void) { TWCR=(1<<TWINT)|(1<<TWSTA)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); }
+void TWI_stop(void) { TWCR=(1<<TWINT)|(1<<TWSTO)|(1<<TWEN); }
+void TWI_write(uint8_t d) { TWDR=d; TWCR=(1<<TWINT)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); }
+uint8_t TWI_read_ack(void) { TWCR=(1<<TWINT)|(1<<TWEN)|(1<<TWEA); while(!(TWCR&(1<<TWINT))); return TWDR; }
+uint8_t TWI_read_nack(void) { TWCR=(1<<TWINT)|(1<<TWEN); while(!(TWCR&(1<<TWINT))); return TWDR; }
+
+// =================================================================
+// [4] MAX30102 Driver
+// =================================================================
+#define MAX30102_ADDR_W 0xAE
+#define MAX30102_ADDR_R 0xAF
+
+void WriteReg(uint8_t r, uint8_t v) {
+    TWI_start(); TWI_write(MAX30102_ADDR_W); TWI_write(r); TWI_write(v); TWI_stop();
+}
+
+void MAX30102_Init_Universal() {
+    WriteReg(0x09, 0x40); delay_ms(100); // Reset
+    WriteReg(0x02, 0xC0); // Interrupt Enable
+    
+    // [수정됨] FIFO Averaging: 0x70(Avg 8) -> 0x50(Avg 4)
+    WriteReg(0x08, 0x50); 
+    
+    // ADC Range 16384nA (11), 400Hz, 411us
+    WriteReg(0x0A, 0x6F); 
+    
+    // LED Current: 0x3F (약 12.6mA)
+    WriteReg(0x0C, 0x3F); 
+    WriteReg(0x0D, 0x3F); 
+    
+    WriteReg(0x09, 0x03); // Mode: SpO2
+}
+
+void ReadFIFO(uint32_t *r, uint32_t *ir) {
+    uint8_t t[6];
+    unsigned char i;
+    TWI_start(); TWI_write(MAX30102_ADDR_W); TWI_write(0x07);
+    TWI_start(); TWI_write(MAX30102_ADDR_R);
+    for(i=0; i<5; i++) t[i]=TWI_read_ack();
+    t[5]=TWI_read_nack();
+    TWI_stop();
+    *r = ((uint32_t)t[0]<<16 | (uint32_t)t[1]<<8 | t[2]) & 0x3FFFF;
+    *ir= ((uint32_t)t[3]<<16 | (uint32_t)t[4]<<8 | t[5]) & 0x3FFFF;
+}
+
+// =================================================================
+// [5] 필터 (Light LPF)
+// =================================================================
+typedef struct {
+    float last_val;
+    unsigned char init;
+} LPF_t;
+
+float LPF_Process(LPF_t *f, float val) {
+    if(f->init == 0) { f->last_val = val; f->init = 1; }
+    else { 
+        // LPF 강도 0.95 (노이즈 제거)
+        f->last_val = 0.95 * f->last_val + 0.05 * val; 
+    }
+    return f->last_val;
+}
+
+LPF_t lpf;
+
+// =================================================================
+// [6] 메인 함수 (동적 임계값 적용)
+// =================================================================
+#define FINGER_TH         10000
+#define MIN_BEAT_INTERVAL 400
+#define INITIAL_VALLEY_GUESS -50.0 
+#define BPM_BUFFER_SIZE   4
+
+void main(void) {
+    uint32_t raw_red, raw_ir;
+    float f_red, dc_remover, ac_signal;
+    unsigned int raw_upper, raw_lower;
+    
+    long last_beat_time = 0;
+    long interval = 0;
+    int bpm_instant = 0;
+    int bpm_avg = 0;
+    
+    unsigned char beat_detected = 0; 
+    
+    float running_valley = INITIAL_VALLEY_GUESS;
+    float dynamic_threshold = 0;
+    
+    int bpm_buffer[BPM_BUFFER_SIZE];
+    unsigned char bpm_idx = 0;
+    long bpm_sum = 0;
+    unsigned char i;
+    unsigned char cnt;
+
+    UART0_init();
+    TWI_init();
+    Timer0_Init();
+    
+    #asm("sei")
+    
+    delay_ms(1000);
+    MAX30102_Init_Universal();
+    
+    lpf.init = 0;
+    dc_remover = 0;
+    for(i=0; i<BPM_BUFFER_SIZE; i++) bpm_buffer[i] = 0;
+
+    while (1) {
+        ReadFIFO(&raw_red, raw_ir);
+        
+        raw_upper = (unsigned int)(raw_red / 10000);
+        raw_lower = (unsigned int)(raw_red % 10000);
+        
+        // 1. 손가락 감지
+        if (raw_red < FINGER_TH) {
+            lpf.init = 0; dc_remover = 0; bpm_avg = 0;
+            running_valley = INITIAL_VALLEY_GUESS;
+            
+            delay_ms(10);
+            printf("%u%04u,0,0,0,0\r\n", raw_upper, raw_lower, bpm_avg);
+            continue;
+        }
+        
+        // 2. 신호 처리
+        f_red = (float)raw_red;
+        f_red = LPF_Process(&lpf, f_red); // LPF 0.95
+        
+        if (dc_remover == 0) dc_remover = f_red;
+        dc_remover = 0.95 * dc_remover + 0.05 * f_red;
+        ac_signal = f_red - dc_remover;
+
+        // 3. 동적 임계값 계산
+        if (ac_signal < running_valley) {
+            running_valley = ac_signal;
+        } else {
+            running_valley = running_valley * 0.99 + 0.01 * INITIAL_VALLEY_GUESS;
+        }
+        dynamic_threshold = running_valley * 0.6;
+
+        // 4. BPM 감지
+        if (ac_signal < dynamic_threshold) {
+            if (beat_detected == 0) {
+                beat_detected = 1; 
+                
+                if ((millis() - last_beat_time) > MIN_BEAT_INTERVAL) {
+                    interval = millis() - last_beat_time;
+                    last_beat_time = millis();
+                    
+                    if (interval != 0) {
+                        bpm_instant = 60000 / interval;
+                        
+                        if (bpm_instant > 40 && bpm_instant < 220) {
+                            // BPM 평균화
+                            bpm_buffer[bpm_idx] = bpm_instant;
+                            bpm_idx = (bpm_idx + 1) % BPM_BUFFER_SIZE;
+                            
+                            bpm_sum = 0;
+                            cnt = 0;
+                            for(i=0; i<BPM_BUFFER_SIZE; i++) {
+                                if(bpm_buffer[i] != 0) {
+                                    bpm_sum += bpm_buffer[i];
+                                    cnt++;
+                                }
+                            }
+                            if(cnt > 0) bpm_avg = bpm_sum / cnt;
+                            else bpm_avg = bpm_instant;
+                        }
+                    }
+                }
+            }
+        } 
+        else {
+            beat_detected = 0;
+        }
+
+        // 5. 데이터 전송
+        printf("%u%04u,%d,%d,0,%d\r\n", raw_upper, raw_lower, (int)ac_signal, (int)dynamic_threshold, bpm_avg);
+
+        delay_ms(10);
+    }
+}
