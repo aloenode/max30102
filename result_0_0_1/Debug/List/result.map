@@ -1,0 +1,37 @@
+RAM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+buzzer_cmd                                                                        0x0500       1
+
+EEPROM Allocation [bytes]
+Variable                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+
+Register Allocation
+Variable                                                                          Register  Size
+------------------------------------------------------------------------------------------------
+
+FLASH Allocation [words]
+Function                                                                          Address   Size
+------------------------------------------------------------------------------------------------
+TWI_wait                                                                          0x00086     18
+TWI_init                                                                          0x00098     10
+TWI_start                                                                         0x000A2      5
+TWI_stop                                                                          0x000A7      8
+TWI_write                                                                         0x000AF      7
+TWI_read_ack                                                                      0x000B6     12
+TWI_read_nack                                                                     0x000C2     16
+MAX30102_writeReg                                                                 0x000D2     24
+MAX30102_readReg                                                                  0x000EA     47
+MAX30102_init                                                                     0x00119     41
+buzzer_off                                                                        0x00142      6
+buzzer_on_2khz                                                                    0x00148     10
+UART0_init                                                                        0x00152     11
+usart0_rx_isr                                                                     0x0015D     19
+main                                                                              0x00170    183
+putchar                                                                           0x00227      7
+put_usart_G100                                                                    0x0022E     14
+_print_G100                                                                       0x0023C    333
+printf                                                                            0x00389     39
+strlen                                                                            0x003B0     12
+strlenf                                                                           0x003BC     13

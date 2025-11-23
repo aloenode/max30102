@@ -5,9 +5,18 @@ import matplotlib.animation as animation
 from collections import deque
 from scipy.signal import butter, lfilter, find_peaks
 
+# [1. GUI 백엔드 강제 설정] - 윈도우 멈춤 방지 핵심
+import matplotlib
+try:
+    matplotlib.use('TkAgg')
+    print("[시스템] GUI 백엔드를 TkAgg로 설정했습니다.")
+except:
+    pass
+
+
 # --- [1. 사용자 설정] ---
 COM_PORT = 'COM6'   # ★ 포트 번호 수정 필요
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 MAX_LEN = 500
 VIEW_LEN = 200
 FS = 25             # ★ 실제 전송 속도 (BPM 뻥튀기 방지용)
@@ -79,11 +88,10 @@ def update(frame):
     while ser.in_waiting:
         try:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
-            if not line: continue
-            parts = line.split(',')
-            if len(parts) >= 1:
-                raw_buffer.append(int(parts[0]))
-        except: pass
+            raw_buffer.append(int(line))
+        except e: 
+            print(e)
+            pass
     
     if len(raw_buffer) < 50: return line_raw, line_filt, line_deriv, bpm_text, peak_scatter
 

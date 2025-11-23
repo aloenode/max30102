@@ -1,0 +1,321 @@
+#include <mega128.h>
+#include <delay.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+// --------------------------------------------------------------------------------
+// [1] 설정 및 매크로 정의
+// --------------------------------------------------------------------------------
+
+// I2C 핀 및 레지스터 정의
+#ifndef TWINT
+#define TWINT 7
+#define TWEA  6
+#define TWSTA 5
+#define TWSTO 4
+#define TWWC  3
+#define TWEN  2
+#endif
+
+// 장치 주소 (8비트 주소 기준: 7비트주소 << 1)
+#define MAX30102_ADDR_W 0xAE
+#define MAX30102_ADDR_R 0xAF
+// PCF8574(LCD) 기본 주소는 0x27 또는 0x3F입니다. (안되면 0x3F<<1 로 변경)
+#define LCD_ADDR_W      (0x27 << 1) 
+
+// LCD 제어 비트 (PCF8574 연결 구조)
+#define LCD_BL_ON       0x08  // 백라이트 켜짐
+#define LCD_EN          0x04  // Enable
+#define LCD_RW          0x02  // Read/Write
+#define LCD_RS          0x01  // Register Select
+
+// MAX30102 레지스터
+#define REG_INTR_STATUS_1 0x00
+#define REG_FIFO_WR_PTR   0x04
+#define REG_FIFO_RD_PTR   0x06
+#define REG_FIFO_DATA     0x07
+#define REG_FIFO_CONFIG   0x08
+#define REG_MODE_CONFIG   0x09
+#define REG_SPO2_CONFIG   0x0A
+#define REG_LED1_PA       0x0C
+#define REG_LED2_PA       0x0D
+
+// 통신 버퍼 설정
+#define RX_BUFFER_SIZE 20
+volatile char rx_buffer[RX_BUFFER_SIZE];
+volatile uint8_t rx_index = 0;
+volatile uint8_t msg_ready = 0; // 메시지 수신 완료 플래그
+
+// --------------------------------------------------------------------------------
+// [2] I2C (TWI) 저수준 함수 - 타임아웃 기능 포함
+// --------------------------------------------------------------------------------
+void TWI_init(void) {
+    TWSR = 0x00; 
+    TWBR = 72;   // 16MHz 기준 약 100kHz 속도
+    TWCR = (1 << TWEN);
+}
+
+// 타임아웃이 있는 대기 함수 (시스템 멈춤 방지)
+unsigned char TWI_wait(void) {
+    unsigned int timeout = 0;
+    while (!(TWCR & (1 << TWINT))) {
+        timeout++;
+        if (timeout > 30000) return 0; // 타임아웃 발생
+    }
+    return 1;
+}
+
+unsigned char TWI_start(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    return TWI_wait();
+}
+
+void TWI_stop(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+    delay_us(100);
+}
+
+unsigned char TWI_write(unsigned char data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    return TWI_wait();
+}
+
+unsigned char TWI_read_ack(unsigned char *data) {
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA);
+    if (!TWI_wait()) return 0;
+    *data = TWDR;
+    return 1;
+}
+
+unsigned char TWI_read_nack(unsigned char *data) {
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    if (!TWI_wait()) return 0;
+    *data = TWDR;
+    return 1;
+}
+
+// --------------------------------------------------------------------------------
+// [3] LCD (I2C) 제어 함수
+// --------------------------------------------------------------------------------
+// PCF8574에 1바이트 전송
+void lcd_i2c_transmit(uint8_t data) {
+    if(!TWI_start()) return;
+    if(!TWI_write(LCD_ADDR_W)) return;
+    TWI_write(data);
+    TWI_stop();
+}
+
+// 4비트 전송 로직 (Enable 펄스 생성)
+void lcd_send_nibble(uint8_t nibble, uint8_t mode) {
+    uint8_t data = (nibble & 0xF0) | mode | LCD_BL_ON; 
+    lcd_i2c_transmit(data | LCD_EN);  // Enable High
+    delay_us(2);
+    lcd_i2c_transmit(data & ~LCD_EN); // Enable Low
+    delay_us(50); 
+}
+
+// 1바이트 전송 (상위 4비트 -> 하위 4비트)
+void lcd_send_byte(uint8_t val, uint8_t mode) {
+    uint8_t high = val & 0xF0;
+    uint8_t low = (val << 4) & 0xF0;
+    lcd_send_nibble(high, mode);
+    lcd_send_nibble(low, mode);
+}
+
+void lcd_command(uint8_t cmd) { lcd_send_byte(cmd, 0); }      // 명령어 전송
+void lcd_data(uint8_t data)   { lcd_send_byte(data, LCD_RS); } // 데이터 전송
+
+void lcd_init(void) {
+    delay_ms(50);
+    // 초기화 시퀀스
+    lcd_send_nibble(0x30, 0); delay_ms(5);
+    lcd_send_nibble(0x30, 0); delay_us(200);
+    lcd_send_nibble(0x30, 0); delay_us(100);
+    lcd_send_nibble(0x20, 0); delay_ms(2); // 4비트 모드 설정
+
+    lcd_command(0x28); // 4-bit, 2 lines
+    lcd_command(0x0C); // Display ON
+    lcd_command(0x06); // Increment Cursor
+    lcd_command(0x01); // Clear Display
+    delay_ms(2);
+}
+
+void lcd_string(char *str) {
+    while (*str) lcd_data(*str++);
+}
+
+void lcd_gotoxy(uint8_t x, uint8_t y) {
+    uint8_t addr = (y == 0) ? 0x80 : 0xC0;
+    addr += x;
+    lcd_command(addr);
+}
+
+// --------------------------------------------------------------------------------
+// [4] MAX30102 제어 함수
+// --------------------------------------------------------------------------------
+void MAX30102_writeReg(unsigned char reg, unsigned char value) {
+    if (!TWI_start()) return;
+    if (!TWI_write(MAX30102_ADDR_W)) return;
+    if (!TWI_write(reg)) return;
+    if (!TWI_write(value)) return;
+    TWI_stop();
+}
+
+unsigned char MAX30102_readReg(unsigned char reg, unsigned char *result) {
+    if (!TWI_start()) return 0;
+    if (!TWI_write(MAX30102_ADDR_W)) return 0;
+    if (!TWI_write(reg)) return 0;
+    if (!TWI_start()) return 0; 
+    if (!TWI_write(MAX30102_ADDR_R)) return 0;
+    if (!TWI_read_nack(result)) return 0;
+    TWI_stop();
+    return 1;
+}
+
+void MAX30102_init(void) {
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x40); delay_ms(100); // Reset
+    MAX30102_writeReg(REG_FIFO_CONFIG, 0x50); 
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x03); // SpO2 Mode
+    MAX30102_writeReg(REG_SPO2_CONFIG, 0x27); 
+    MAX30102_writeReg(REG_LED1_PA, 0x24);      
+    MAX30102_writeReg(REG_LED2_PA, 0x24);
+    MAX30102_writeReg(REG_FIFO_WR_PTR, 0x00);
+    MAX30102_writeReg(0x05, 0x00); 
+    MAX30102_writeReg(REG_FIFO_RD_PTR, 0x00);
+}
+
+// --------------------------------------------------------------------------------
+// [5] 부저 및 UART 제어
+// --------------------------------------------------------------------------------
+void buzzer_off(void) {
+    TCCR1A = 0; TCCR1B = 0;
+    DDRB &= ~(1 << 5); PORTB &= ~(1 << 5);
+}
+
+void buzzer_on_2khz(void) {
+    DDRB |= (1 << 5); // PB5 (OC1A) 출력 설정
+    TCCR1A = (1 << COM1A0); // Toggle OC1A on Compare Match
+    TCCR1B = (1 << WGM12) | (1 << CS11); // CTC Mode, Prescaler 8
+    OCR1A = 499; // 16MHz / (2 * 8 * (1+499)) = 2000Hz
+}
+
+void UART0_init(void) {
+    UCSR0B = (1<<RXCIE0) | (1<<RXEN0) | (1<<TXEN0);
+    UCSR0C = 0x06; // 8 Data bits, No parity, 1 Stop bit
+    UBRR0H = 0; UBRR0L = 8; // 115200 bps @ 16MHz
+}
+
+// UART 수신 인터럽트: PC에서 오는 패킷 파싱 (<BPM,Status>)
+interrupt [USART0_RXC] void usart0_rx_isr(void) {
+    char received = UDR0;
+    
+    if (received == '<') { 
+        rx_index = 0; // 패킷 시작
+    } 
+    else if (received == '>') {
+        rx_buffer[rx_index] = '\0'; // 문자열 종료
+        msg_ready = 1; // 처리 요청 플래그
+    } 
+    else {
+        if (rx_index < RX_BUFFER_SIZE - 1) {
+            rx_buffer[rx_index++] = received;
+        }
+    }
+}
+
+// --------------------------------------------------------------------------------
+// [6] 메인 함수
+// --------------------------------------------------------------------------------
+void main(void) {
+    uint32_t red_val;
+    unsigned char ptr_w, ptr_r;
+    unsigned char d[6];
+    unsigned char success;
+    int i;
+    
+    // 파싱용 변수
+    int pc_bpm = 0;
+    char pc_status = 'N';
+    char lcd_line[16];
+
+    // 하드웨어 초기화
+    UART0_init();
+    TWI_init();    
+    MAX30102_init();
+    lcd_init();
+
+    // 초기 화면
+    printf("System Start\r\n");
+    lcd_gotoxy(0, 0); lcd_string("System Ready");
+    lcd_gotoxy(0, 1); lcd_string("Wait PC...");
+    delay_ms(1000);
+    lcd_command(0x01); // 화면 클리어
+
+    #asm("sei") // 전역 인터럽트 허용
+
+    while (1) {
+        // --- 1. PC 데이터 수신 및 처리 ---
+        if (msg_ready) {
+            // rx_buffer: "75,N" 또는 "40,W"
+            // 포맷 파싱
+            if (sscanf(rx_buffer, "%d,%c", &pc_bpm, &pc_status) == 2) {
+                
+                // LCD 첫 번째 줄: BPM
+                sprintf(lcd_line, "HR: %d BPM    ", pc_bpm);
+                lcd_gotoxy(0, 0);
+                lcd_string(lcd_line);
+
+                // LCD 두 번째 줄 & 부저: 상태
+                lcd_gotoxy(0, 1);
+                if (pc_status == 'N') {
+                    lcd_string("Status: Normal  ");
+                    buzzer_off();
+                } 
+                else if (pc_status == 'W') {
+                    lcd_string("Status: WARNING!");
+                    buzzer_on_2khz();
+                }
+            }
+            msg_ready = 0; // 플래그 초기화
+        }
+
+        // --- 2. 센서 데이터 읽기 및 PC 전송 ---
+        success = 1;
+        if (!MAX30102_readReg(REG_FIFO_WR_PTR, &ptr_w)) success = 0;
+        if (success && !MAX30102_readReg(REG_FIFO_RD_PTR, &ptr_r)) success = 0;
+
+        // 데이터가 있으면 읽기
+        if (success && (ptr_w != ptr_r)) {
+            // Burst Read Sequence
+            if (!TWI_start()) success = 0;
+            if (success && !TWI_write(MAX30102_ADDR_W)) success = 0;
+            if (success && !TWI_write(REG_FIFO_DATA)) success = 0;
+            if (success && !TWI_start()) success = 0;
+            if (success && !TWI_write(MAX30102_ADDR_R)) success = 0;
+
+            if (success) {
+                for(i=0; i<5; i++) {
+                    if (!TWI_read_ack(&d[i])) { success = 0; break; }
+                }
+                if (success && !TWI_read_nack(&d[5])) success = 0;
+            }
+            if (success) TWI_stop();
+
+            // 읽기 성공 시 PC로 Raw 데이터 전송
+            if (success) {
+                red_val = ((uint32_t)d[0] << 16 | (uint32_t)d[1] << 8 | d[2]) & 0x03FFFF;
+                printf("%ld\r\n", red_val);
+            }
+        }
+
+        // --- 3. I2C 에러 복구 ---
+        if (!success) {
+            // 통신 장애 시 리셋
+            TWCR = 0; delay_ms(10); TWI_init();
+            // 필요 시 에러 메시지 출력 가능
+        }
+    }
+}

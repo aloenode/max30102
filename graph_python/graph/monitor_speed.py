@@ -2,7 +2,7 @@ import serial
 import time
 
 COM_PORT = 'COM6'  # 포트 번호 확인
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 
 try:
     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)

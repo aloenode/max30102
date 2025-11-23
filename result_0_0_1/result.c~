@@ -1,0 +1,188 @@
+#include <mega128.h>
+#include <delay.h>
+#include <stdio.h>
+#include <stdint.h>
+
+// --- I2C 설정 ---
+#ifndef TWINT
+#define TWINT 7
+#define TWEA  6
+#define TWSTA 5
+#define TWSTO 4
+#define TWWC  3
+#define TWEN  2
+#endif
+
+#define MAX30102_ADDR_W 0xAE
+#define MAX30102_ADDR_R 0xAF
+
+// Register Addresses
+#define REG_INTR_STATUS_1 0x00
+#define REG_INTR_STATUS_2 0x01
+#define REG_FIFO_WR_PTR   0x04
+#define REG_OVF_COUNTER   0x05
+#define REG_FIFO_RD_PTR   0x06
+#define REG_FIFO_DATA     0x07
+#define REG_FIFO_CONFIG   0x08
+#define REG_MODE_CONFIG   0x09
+#define REG_SPO2_CONFIG   0x0A
+#define REG_LED1_PA       0x0C
+#define REG_LED2_PA       0x0D
+
+// --- TWI 함수 ---
+void TWI_init(void) {
+    TWSR = 0x00; 
+    TWBR = 72;   // 100kHz @ 16MHz
+    TWCR = (1 << TWEN);
+}
+
+void TWI_start(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+void TWI_stop(void) {
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
+
+void TWI_write(unsigned char data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+unsigned char TWI_read_ack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA);
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+unsigned char TWI_read_nack(void) {
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+    return TWDR;
+}
+
+void MAX30102_writeReg(unsigned char reg, unsigned char value) {
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(reg);
+    TWI_write(value);
+    TWI_stop();
+}
+
+unsigned char MAX30102_readReg(unsigned char reg) {
+    unsigned char data;
+    TWI_start();
+    TWI_write(MAX30102_ADDR_W);
+    TWI_write(reg);
+    TWI_start();
+    TWI_write(MAX30102_ADDR_R);
+    data = TWI_read_nack();
+    TWI_stop();
+    return data;
+}
+
+void MAX30102_init(void) {
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x40); // Reset
+    delay_ms(100);
+    MAX30102_writeReg(REG_FIFO_CONFIG, 0x50); // Sample Avg=4, Rollover=Enable
+    MAX30102_writeReg(REG_MODE_CONFIG, 0x03); // SpO2 Mode
+    MAX30102_writeReg(REG_SPO2_CONFIG, 0x27); // 4096nA, 100Hz, 411us
+    MAX30102_writeReg(REG_LED1_PA, 0x24);     // LED Current
+    MAX30102_writeReg(REG_LED2_PA, 0x24);
+    
+    // Clear Pointers
+    MAX30102_writeReg(REG_FIFO_WR_PTR, 0x00);
+    MAX30102_writeReg(REG_OVF_COUNTER, 0x00);
+    MAX30102_writeReg(REG_FIFO_RD_PTR, 0x00);
+}
+
+// --- 부저 제어 (최적화됨) ---
+// PB5 (OC1A) 핀 사용
+void buzzer_off(void) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    DDRB &= ~(1 << 5);  // Input으로 변경하여 소리 차단
+    PORTB &= ~(1 << 5); // Low 상태 유지
+}
+
+void buzzer_on_2khz(void) {
+    // 2kHz 경고음을 위한 하드코딩된 설정 (계산 부하 제거)
+    // OCR = (16,000,000 / (2 * 8 * 2000)) - 1 = 499
+    
+    DDRB |= (1 << 5);   // PB5 Output
+    TCCR1A = (1 << COM1A0); // Toggle OC1A on Compare Match
+    TCCR1B = (1 << WGM12) | (1 << CS11); // CTC Mode, Prescaler 8
+    OCR1A = 499; // 2kHz 설정값
+}
+
+// --- UART 초기화 (115200bps) ---
+void UART0_init(void) {
+    UCSR0B = (1<<RXCIE0) | (1<<RXEN0) | (1<<TXEN0);
+    UCSR0C = 0x06; // 8 Data, 1 Stop, No Parity
+    
+    // 115200 bps @ 16MHz -> UBRR = 8
+    UBRR0H = 0;
+    UBRR0L = 8; 
+}
+
+// --- UART 수신 인터럽트 (PC 명령 처리) ---
+interrupt [USART0_RXC] void usart0_rx_isr(void) {
+    char cmd = UDR0;
+    
+    if (cmd == '1') {
+        buzzer_on_2khz(); // 경고음 켜기
+    } 
+    else if (cmd == '0') {
+        buzzer_off();     // 경고음 끄기
+    }
+}
+
+void main(void) {
+    uint32_t red_val;
+    unsigned char ptr_w, ptr_r;
+    unsigned char d[6];
+    int i;
+
+    // 초기화
+    UART0_init();
+    TWI_init();
+    
+    printf("MAX30102 Init...\r\n");
+    MAX30102_init();
+    
+    #asm("sei") // 인터럽트 허용
+    
+    printf("Init Done.\r\n");
+
+    while (1) {
+        // 1. FIFO 포인터 확인
+        ptr_w = MAX30102_readReg(REG_FIFO_WR_PTR);
+        ptr_r = MAX30102_readReg(REG_FIFO_RD_PTR);
+
+        // 2. 데이터가 있을 때만 읽기
+        if (ptr_w != ptr_r) {
+            // Burst Read (레지스터 주소 쓰기 -> 데이터 6바이트 읽기)
+            TWI_start();
+            TWI_write(MAX30102_ADDR_W);
+            TWI_write(REG_FIFO_DATA);
+            TWI_start();
+            TWI_write(MAX30102_ADDR_R);
+
+            for(i=0; i<5; i++) d[i] = TWI_read_ack();
+            d[5] = TWI_read_nack();
+            TWI_stop();
+
+            // Red LED 데이터 조합
+            red_val = ((uint32_t)d[0] << 16 | (uint32_t)d[1] << 8 | d[2]) & 0x03FFFF;
+
+            // PC로 전송 (필터링은 PC가 하므로 Raw값만 보냄)
+            // IR 값이나 필터링된 값은 보내지 않아 통신 속도 확보
+            printf("%ld\r\n", red_val);
+        }
+        
+        // delay_ms(5) 제거: UART 통신 자체가 딜레이 역할을 하며,
+        // 115200bps에서는 100Hz 샘플링 속도를 충분히 따라갈 수 있습니다.
+    }
+}
